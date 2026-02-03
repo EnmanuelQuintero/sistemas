@@ -50,51 +50,71 @@
 
                 <tbody>
                     @foreach($nomina->detalles as $index => $detalle)
-                        @php
-                            $empleado = $detalle->empleado;
-                            $salarioMensual = $empleado->salario;
-                            $salarioDiario = $salarioMensual / 30;
-                            $salarioHoras = $salarioDiario / 8;
+                    @php
+                        $empleado = $detalle->empleado;
 
-                            // Rango de fechas según la quincena
-                            $fechaInicio = $nomina->quincena == 1 
-                                ? Carbon\Carbon::create($nomina->created_at->year, $nomina->mes, 1) 
-                                : Carbon\Carbon::create($nomina->created_at->year, $nomina->mes, 16);
+                        // ===== Cálculos base (SIN redondear) =====
+                        $salarioMensual = (float) $empleado->salario;
 
-                            $fechaFin = $nomina->quincena == 1
-                                ? Carbon\Carbon::create($nomina->created_at->year, $nomina->mes, 15)
-                                : Carbon\Carbon::create($nomina->created_at->year, $nomina->mes, Carbon\Carbon::parse($nomina->created_at)->daysInMonth);
+                        $salarioDiario = $salarioMensual / 30;
+                        $salarioHora   = $salarioDiario / 8;
 
-                            // Días trabajados
-                            $diasTrabajados = \App\Models\Dia::where('empleado_id', $empleado->id)
-                                ->whereBetween('fecha', [$fechaInicio, $fechaFin])
-                                ->whereIn('tipo', [1,2,3])
-                                ->count();
+                        // ===== Fechas =====
+                        $year = $nomina->created_at->year;
 
-                            // Horas extras (cantidad y total)
-                            $horasExtrasCantidad = \App\Models\Extra::where('empleado_id', $empleado->id)
-                                ->whereBetween('fecha', [$fechaInicio, $fechaFin])
-                                ->sum('cantidad');
+                        $fechaInicio = $nomina->quincena == 1
+                            ? \Carbon\Carbon::create($year, $nomina->mes, 1)
+                            : \Carbon\Carbon::create($year, $nomina->mes, 16);
 
-                            $horasExtras = ($horasExtrasCantidad * $salarioHoras) * 2;
+                        $fechaFin = $nomina->quincena == 1
+                            ? \Carbon\Carbon::create($year, $nomina->mes, 15)
+                            : \Carbon\Carbon::create($year, $nomina->mes)->endOfMonth();
 
-                            // Salario proporcional
-                            $salarioQuincenal = ($salarioDiario * $diasTrabajados) + $horasExtras;
+                        // ===== Días trabajados =====
+                        $diasTrabajados = Dia::where('empleado_id', $empleado->id)
+                            ->whereBetween('fecha', [$fechaInicio, $fechaFin])
+                            ->whereIn('tipo', [1,2,3])
+                            ->count();
 
-                            $feriado = 0; 
-                            $subsidioDias = 0; 
+                        // ===== Ajuste especial febrero (14 → 15 días) =====
+                        $totalDiasRango = $fechaInicio->diffInDays($fechaFin) + 1;
 
-                            $totalDevengado = $salarioQuincenal + $feriado;
+                        // Si es febrero y trabajó todos los días de la quincena (14), pagar 15
+                        if ($fechaInicio->month == 2 && $totalDiasRango == 15 && $diasTrabajados == 14) {
+                            $diasTrabajados = 15;
+                        }
 
-                            $inss = $detalle->inss;
-                            $ir = $detalle->ir;
-                            $totalDeduccion = $inss + $ir;
+                        // ===== Horas extras =====
+                        $horasExtrasCantidad = Extra::where('empleado_id', $empleado->id)
+                            ->whereBetween('fecha', [$fechaInicio, $fechaFin])
+                            ->sum('cantidad');
 
-                            $neto = $totalDevengado - $totalDeduccion;
+                        $horasExtras = ($horasExtrasCantidad * $salarioHora) * 2;
 
-                            $inatec = $detalle->inatec;
-                            $inssPatronal = $detalle->patronal;
-                        @endphp
+                        // ===== Devengado =====
+                        $salarioBase = $salarioDiario * $diasTrabajados;
+
+                        
+                        $salarioQuincenal = $salarioBase;
+
+                        $feriado = 0;
+                        $subsidioDias = 0;
+
+                        $totalDevengado = $salarioBase + $horasExtras + $feriado;
+
+                        // ===== Deducciones =====
+                        $inss = (float) $detalle->inss;
+                        $ir   = (float) $detalle->ir;
+
+                        $totalDeduccion = $inss + $ir;
+
+                        // ===== Totales finales (REDONDEAR SOLO AQUÍ) =====
+                        $neto = round($totalDevengado - $totalDeduccion, 2);
+
+                        $inatec = (float) $detalle->inatec;
+                        $inssPatronal = (float) $detalle->patronal;
+                    @endphp
+
                         <tr class="{{ $index % 2 == 0 ? 'bg-white' : 'bg-gray-50' }}">
                             <td class="border px-3 py-2 text-center">{{ $index+1 }}</td>
                             <td class="border px-3 py-2">{{ $detalle->empleado->nombre }}</td>

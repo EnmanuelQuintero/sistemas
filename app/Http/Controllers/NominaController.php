@@ -51,6 +51,8 @@ class NominaController extends Controller
     {
         $hoy = Carbon::now();
         $mes = $hoy->month;
+        $year = $hoy->year;
+
         $quincena = $hoy->day <= 15 ? 1 : 2;
 
         // Obtener nómina existente o crear nueva
@@ -62,27 +64,48 @@ class NominaController extends Controller
         $empleados = Empleado::where('activo', 1)->get();
 
         foreach ($empleados as $empleado) {
-            $inicio = $quincena === 1 ? 1 : 16;
-            $fin = $quincena === 1 ? 15 : Carbon::now()->daysInMonth;
-            $salarioHoras = ($empleado->salario/30)/8;
+
+            // ===== Rango de fechas =====
+            $inicioDia = $quincena === 1 ? 1 : 16;
+            $finDia = $quincena === 1 ? 15 : Carbon::create($year, $mes)->daysInMonth;
+
+            $inicioFecha = Carbon::create($year, $mes, $inicioDia);
+            $finFecha    = Carbon::create($year, $mes, $finDia);
+
+            // ===== Salarios base =====
+            $salarioDiario = $empleado->salario / 30;
+            $salarioHora   = $salarioDiario / 8;
+
+            // ===== Días trabajados =====
             $diasTrabajados = Dia::where('empleado_id', $empleado->id)
-                ->whereBetween('fecha', [Carbon::create($hoy->year, $mes, $inicio), Carbon::create($hoy->year, $mes, $fin)])
+                ->whereBetween('fecha', [$inicioFecha, $finFecha])
                 ->whereIn('tipo', [1,2,3])
                 ->count();
 
-            $horasExtras = Extra::where('empleado_id', $empleado->id)
-                ->whereBetween('fecha', [Carbon::create($hoy->year, $mes, $inicio), Carbon::create($hoy->year, $mes, $fin)])
+            // ===== Ajuste especial febrero (14 → 15) =====
+            $totalDiasRango = $inicioFecha->diffInDays($finFecha) + 1;
+
+            if ($mes == 2 && $totalDiasRango == 15 && $diasTrabajados == 14) {
+                $diasTrabajados = 15;
+            }
+
+            // ===== Horas extras =====
+            $horasExtrasCantidad = Extra::where('empleado_id', $empleado->id)
+                ->whereBetween('fecha', [$inicioFecha, $finFecha])
                 ->sum('cantidad');
-            //dd($horasExtras);
-            $horasExtras= ($horasExtras * $salarioHoras )*2;
-            //dd($horasExtras);
-            $salarioQuincenal = ($empleado->salario / 30) * ($diasTrabajados);
-            $salarioQuincenal = $salarioQuincenal + $horasExtras;
+
+            $horasExtras = ($horasExtrasCantidad * $salarioHora) * 2;
+
+            // ===== Devengado =====
+            $salarioQuincenal = ($salarioDiario * $diasTrabajados) + $horasExtras;
+
+            // ===== Deducciones =====
             $inss = $salarioQuincenal * 0.07;
-            $ir = $this->calcularIR(($salarioQuincenal*2)); // <- Aquí pasamos el salario mensual
+            $ir   = $this->calcularIR($salarioQuincenal * 2); // salario mensual
             $inatec = $salarioQuincenal * 0.02;
             $patronal = $salarioQuincenal * 0.20;
 
+            // ===== Guardar detalle =====
             DetalleNomina::updateOrCreate(
                 ['nomina_id' => $nomina->id, 'empleado_id' => $empleado->id],
                 [
@@ -94,36 +117,47 @@ class NominaController extends Controller
             );
         }
 
-        return redirect()->route('nominas.index')->with('success', 'Nómina generada/actualizada correctamente');
+        return redirect()
+            ->route('nominas.index')
+            ->with('success', 'Nómina generada/actualizada correctamente');
     }
+
 
     private function calcularIR($salarioMensual)
     {
-        $salarioAnual = round($salarioMensual * 12, 2);
-        $inssAnual = round($salarioAnual * 0.07, 2);
-        $rentaNetaAnual = round($salarioAnual - $inssAnual, 2);
+        // Helper local para forzar 2 decimales exactos
+        $m = fn($v) => (float) number_format($v, 2, '.', '');
+
+        $salarioAnual     = $m($salarioMensual * 12);
+        $inssAnual        = $m($salarioAnual * 0.07);
+        $rentaNetaAnual   = $m($salarioAnual - $inssAnual);
 
         $tabla = [
-            ['min' => 0, 'max' => 100000, 'tasa' => 0.0, 'cuota' => 0],
-            ['min' => 100000.01, 'max' => 200000, 'tasa' => 0.15, 'cuota' => 0],
-            ['min' => 200000.01, 'max' => 350000, 'tasa' => 0.20, 'cuota' => 15000],
-            ['min' => 350000.01, 'max' => 500000, 'tasa' => 0.25, 'cuota' => 45000],
-            ['min' => 500000.01, 'max' => INF, 'tasa' => 0.30, 'cuota' => 82500],
+            ['min' => 0,         'max' => 100000,   'tasa' => 0.0,  'cuota' => 0],
+            ['min' => 100001.00, 'max' => 200000,   'tasa' => 0.15, 'cuota' => 0],
+            ['min' => 200001.00, 'max' => 350000,   'tasa' => 0.20, 'cuota' => 15000],
+            ['min' => 350001.00, 'max' => 500000,   'tasa' => 0.25, 'cuota' => 45000],
+            ['min' => 500001.00, 'max' => INF,      'tasa' => 0.30, 'cuota' => 82500],
         ];
 
         $irAnual = 0;
+
         foreach ($tabla as $tramo) {
             if ($rentaNetaAnual >= $tramo['min'] && $rentaNetaAnual <= $tramo['max']) {
-                $irAnual = round(($rentaNetaAnual - $tramo['min']) * $tramo['tasa'] + $tramo['cuota'], 2);
+                $irAnual = $m(
+                    ($rentaNetaAnual - $tramo['min']) * $tramo['tasa'] + $tramo['cuota']
+                );
                 break;
             }
         }
 
-        $irMensual = round($irAnual / 12, 2);
-        $irQuincenal = round($irMensual / 2, 2);
-
+        $irMensual   = $m($irAnual / 12);
+        $irQuincenal = $m($irMensual / 2);
+        $irQuincenal = round($irQuincenal, 1);
+        //dd($irQuincenal);
         return $irQuincenal;
     }
+
 
     // Muestra detalle de la nómina
     // Mostrar detalle de nómina
